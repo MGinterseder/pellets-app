@@ -156,8 +156,11 @@ function cfg() { return { repo: store.get("repo").trim(), token: store.get("toke
 async function gh(path, opts = {}) {
   const { repo, token } = cfg();
   if (!repo || !token) throw new Error("Set repository and token under Settings.");
+  // No `cache: "no-store"`: Firefox then sends Cache-Control and Pragma, which GitHub's CORS
+  // rules do not allow, and the request fails as a NetworkError. Freshness comes from the
+  // unique t= parameter on every read instead.
   const res = await fetch(`https://api.github.com/repos/${repo}${path}`, {
-    cache: "no-store", ...opts,
+    ...opts,
     headers: { Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28",
                Accept: opts.raw ? "application/vnd.github.raw+json" : "application/vnd.github+json",
                ...(opts.body ? { "Content-Type": "application/json" } : {}) },
