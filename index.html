@@ -170,14 +170,25 @@ function parseEuDate(text) {
   const t = new Date(iso + "T00:00:00Z");
   return !isNaN(t) && t.getUTCDate() === d && t.getUTCMonth() + 1 === mo ? iso : null;
 }
-const APP_VERSION = "2026-11-15c";
+const APP_VERSION = "2026-11-15d";
 
 // ---------------------------------------------------------------- GitHub API
-function cfg() { return { repo: store.get("repo").trim(), token: store.get("token").trim() }; }
+// The API path needs exactly "owner/name". Anything else (a pasted github.com address, a
+// trailing slash, a space) makes GitHub answer the browser's CORS pre-check with 404, which
+// Firefox reports only as "NetworkError". So the field is cleaned, then checked.
+function cleanRepo(text) {
+  return text.trim()
+    .replace(/^https?:\/\//i, "").replace(/^(www\.)?github\.com\//i, "")
+    .replace(/\.git$/i, "").replace(/\s+/g, "").replace(/\/+$/, "")
+    .split("/").slice(0, 2).join("/");
+}
+const cleanToken = text => text.replace(/\s+/g, "");
+function cfg() { return { repo: cleanRepo(store.get("repo")), token: cleanToken(store.get("token")) }; }
 
 async function gh(path, opts = {}) {
   const { repo, token } = cfg();
   if (!repo || !token) throw new Error("Set repository and token under Settings.");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`Repository "${repo}" is not in the form owner/name.`);
   // No `cache: "no-store"`: Firefox then sends Cache-Control and Pragma, which GitHub's CORS
   // rules do not allow, and the request fails as a NetworkError. Freshness comes from the
   // unique t= parameter on every read instead.
@@ -209,8 +220,15 @@ async function diagnoseNetwork(err) {
   if (!navigator.onLine) return "No network connection.";
   if (!simpleOk) return "This browser cannot reach api.github.com at all. A content blocker, tracking " +
     "protection or private DNS on this phone may be blocking it; allow api.github.com and retry.";
-  return `GitHub is reachable, but the request with the token was blocked (${err.message}). ` +
-    "A browser add-on may be stripping or blocking it; try with add-ons off for this page.";
+  // Same CORS pre-check as the real request, without the token: if this fails too, the path is the problem.
+  const { repo } = cfg();
+  let pathOk = false;
+  try { pathOk = (await fetch(`https://api.github.com/repos/${repo}?t=${Date.now()}`,
+    { headers: { "X-GitHub-Api-Version": "2022-11-28" } })).status !== 0; } catch {}
+  if (!pathOk) return `GitHub refused the request for repository "${repo}". ` +
+    "Check under Settings that it reads exactly MGinterseder/pelletsverbrauch.";
+  return `GitHub is reachable and "${repo}" is fine, but the request with the token was blocked (${err.message}). ` +
+    "Re-paste the token under Settings; if that does not help, try with browser add-ons off for this page.";
 }
 
 const resultFile = name => gh(`/contents/${name}?ref=results&t=${Date.now()}`, { raw: true });
@@ -401,10 +419,11 @@ $("refresh").onclick = loadAll;
 $("openReport").onclick = openReport;
 $("closeReport").onclick = () => { $("reportWrap").classList.add("hidden"); $("reportFrame").srcdoc = ""; };
 $("settingsBtn").onclick = () => $("settings").classList.toggle("hidden");
-$("repo").value = store.get("repo");
+$("repo").value = cleanRepo(store.get("repo"));
 $("token").value = store.get("token");
 $("saveSettings").onclick = () => {
-  store.set("repo", $("repo").value.trim()); store.set("token", $("token").value.trim());
+  store.set("repo", cleanRepo($("repo").value)); store.set("token", cleanToken($("token").value));
+  $("repo").value = cleanRepo($("repo").value);
   $("settings").classList.add("hidden"); loadAll();
 };
 if (!cfg().repo || !cfg().token) $("settings").classList.remove("hidden"); else loadAll();
