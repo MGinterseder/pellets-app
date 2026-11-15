@@ -44,6 +44,9 @@ input, button, select { font:inherit; }
 input[type=date], input[type=number], input[type=text], input[type=password] {
   width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
   background:var(--bg); color:var(--ink); min-height:44px; }
+.daterow { display:grid; grid-template-columns:1fr auto auto; gap:6px; }
+.chip { border:1px solid var(--line); background:var(--bg); color:var(--ink); border-radius:8px; padding:0 10px; min-height:44px; font-size:14px; }
+#version { text-align:center; }
 .seg { display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
 .seg button { border:0; padding:10px; background:var(--bg); color:var(--ink); min-height:44px; }
 .seg button[aria-pressed=true] { background:var(--accent); color:var(--accent-ink); font-weight:600; }
@@ -103,8 +106,12 @@ th { color:var(--muted); font-weight:600; font-size:12px; }
       <button type="button" id="kUsed" aria-pressed="true">Bags used</button>
       <button type="button" id="kStock" aria-pressed="false">Bags counted</button>
     </div>
-    <label for="date">Date</label>
-    <input type="date" id="date">
+    <label for="date">Date (dd.mm.yyyy)</label>
+    <div class="daterow">
+      <input type="text" id="date" inputmode="decimal" placeholder="15.11.2026" autocomplete="off" maxlength="10">
+      <button type="button" class="chip" id="dYesterday">Yesterday</button>
+      <button type="button" class="chip" id="dToday">Today</button>
+    </div>
     <label for="bags" id="bagsLabel">Bags used since the last entry</label>
     <input type="number" id="bags" inputmode="numeric" min="0" max="999" step="1">
     <div class="preview" id="preview"></div>
@@ -126,6 +133,7 @@ th { color:var(--muted); font-weight:600; font-size:12px; }
     <button class="link" id="openReport">Open full report</button>
     <button class="link" id="refresh" style="float:right">Refresh</button>
   </section>
+  <p class="note" id="version"></p>
 </main>
 
 <div id="reportWrap" class="hidden">
@@ -149,6 +157,20 @@ const fmt2 = x => x.toFixed(2);
 const dmy = iso => { const [y, m, d] = iso.split("-"); return `${+d}.${+m}.${y}`; };
 const todayIso = () => { const t = new Date(); t.setMinutes(t.getMinutes() - t.getTimezoneOffset()); return t.toISOString().slice(0, 10); };
 const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+const isoDaysAgo = n => { const t = new Date(Date.parse(todayIso()) - n * 86400000); return t.toISOString().slice(0, 10); };
+// European date entry: d.m.yyyy, with . , / - or space as separator; a two-digit year is 20yy,
+// and a missing year is the current one. Returns ISO yyyy-mm-dd, or null if it is no real date.
+function parseEuDate(text) {
+  const m = text.trim().match(/^(\d{1,2})[.,\/\- ](\d{1,2})(?:[.,\/\- ](\d{2}|\d{4})?)?$/);
+  if (!m) return null;
+  const d = +m[1], mo = +m[2];
+  let y = m[3] ? +m[3] : +todayIso().slice(0, 4);
+  if (y < 100) y += 2000;
+  const iso = `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const t = new Date(iso + "T00:00:00Z");
+  return !isNaN(t) && t.getUTCDate() === d && t.getUTCMonth() + 1 === mo ? iso : null;
+}
+const APP_VERSION = "2026-11-15c";
 
 // ---------------------------------------------------------------- GitHub API
 function cfg() { return { repo: store.get("repo").trim(), token: store.get("token").trim() }; }
@@ -159,12 +181,17 @@ async function gh(path, opts = {}) {
   // No `cache: "no-store"`: Firefox then sends Cache-Control and Pragma, which GitHub's CORS
   // rules do not allow, and the request fails as a NetworkError. Freshness comes from the
   // unique t= parameter on every read instead.
-  const res = await fetch(`https://api.github.com/repos/${repo}${path}`, {
+  let res;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}${path}`, {
     ...opts,
     headers: { Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28",
                Accept: opts.raw ? "application/vnd.github.raw+json" : "application/vnd.github+json",
                ...(opts.body ? { "Content-Type": "application/json" } : {}) },
-  });
+    });
+  } catch (e) {
+    throw new Error(await diagnoseNetwork(e));
+  }
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
     try { const j = await res.json(); if (j.message) msg += `: ${j.message}`; } catch {}
@@ -174,6 +201,18 @@ async function gh(path, opts = {}) {
   }
   return opts.raw ? res.text() : (res.status === 204 ? null : res.json());
 }
+// A request that never got an answer. Tell apart "GitHub unreachable from this browser"
+// (content blocker, private DNS, no network) from "only the signed request was blocked".
+async function diagnoseNetwork(err) {
+  let simpleOk = false;
+  try { simpleOk = (await fetch(`https://api.github.com/zen?t=${Date.now()}`)).ok; } catch {}
+  if (!navigator.onLine) return "No network connection.";
+  if (!simpleOk) return "This browser cannot reach api.github.com at all. A content blocker, tracking " +
+    "protection or private DNS on this phone may be blocking it; allow api.github.com and retry.";
+  return `GitHub is reachable, but the request with the token was blocked (${err.message}). ` +
+    "A browser add-on may be stripping or blocking it; try with add-ons off for this page.";
+}
+
 const resultFile = name => gh(`/contents/${name}?ref=results&t=${Date.now()}`, { raw: true });
 
 // ---------------------------------------------------------------- loading
@@ -264,9 +303,11 @@ function setKind(kind) {
 
 function draft() {
   const last = state.ledger[state.ledger.length - 1];
-  const date = $("date").value, raw = $("bags").value.trim();
+  const dateText = $("date").value.trim(), raw = $("bags").value.trim();
   if (!last) return { error: "Load the data first." };
-  if (!date) return { error: "" };
+  if (!dateText) return { error: "" };
+  const date = parseEuDate(dateText);
+  if (!date) return { error: "Enter the date as dd.mm.yyyy, e.g. 15.11.2026." };
   if (date > todayIso()) return { error: "The date is in the future." };
   const days = daysBetween(last.date, date);
   if (days <= 0) return { error: `The last entry is ${dmy(last.date)}; pick a later date.` };
@@ -346,8 +387,11 @@ async function openReport() {
 }
 
 // ---------------------------------------------------------------- wiring
-$("date").value = todayIso();
-$("date").max = todayIso();
+const setDate = iso => { $("date").value = dmy(iso).split(".").map((p, i) => i < 2 ? p.padStart(2, "0") : p).join("."); updatePreview(); };
+setDate(todayIso());
+$("dToday").onclick = () => setDate(todayIso());
+$("dYesterday").onclick = () => setDate(isoDaysAgo(1));
+$("version").textContent = `App version ${APP_VERSION}`;
 $("kUsed").onclick = () => setKind("used");
 $("kStock").onclick = () => setKind("stock");
 $("date").oninput = updatePreview;
