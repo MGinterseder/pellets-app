@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E6B54">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Pellets">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>Pellets</title>
+<!--
+  Phone front end for the private pellet repo (DEC-0013). This file holds no data and no
+  secret: the GitHub token is typed in once and kept in this browser's localStorage only.
+  Reads:  results branch (results.json, ledger.csv, status.json, report.html)
+  Writes: nothing directly; starts the "update" workflow, which adds the entry and reruns.
+-->
+<style>
+:root {
+  --bg:#f6f5f0; --card:#ffffff; --ink:#171717; --muted:#5f5f5f; --line:#e2e1d8;
+  --accent:#0E6B54; --accent-ink:#ffffff; --bad:#b3261e; --warn:#8a5a00; --ok:#0E6B54;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#121412; --card:#1c1f1d; --ink:#ecebe6; --muted:#a3a39c; --line:#30342f;
+    --accent:#43B596; --accent-ink:#0b1a14; --bad:#ff8a80; --warn:#f0b35a; --ok:#43B596;
+  }
+}
+* { box-sizing:border-box; }
+html, body { margin:0; background:var(--bg); color:var(--ink);
+  font:16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width:560px; margin:0 auto; padding:max(12px, env(safe-area-inset-top)) 16px 40px; }
+header { display:flex; align-items:center; justify-content:space-between; margin:4px 0 12px; }
+h1 { font-size:22px; margin:0; }
+h2 { font-size:15px; margin:0 0 8px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:0 0 12px; }
+.tiles { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; }
+.tile .k { font-size:12px; color:var(--muted); }
+.tile .v { font-size:24px; font-weight:650; font-variant-numeric:tabular-nums; }
+.tile .r { font-size:12px; color:var(--muted); }
+label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+input, button, select { font:inherit; }
+input[type=date], input[type=number], input[type=text], input[type=password] {
+  width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
+  background:var(--bg); color:var(--ink); min-height:44px; }
+.seg { display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.seg button { border:0; padding:10px; background:var(--bg); color:var(--ink); min-height:44px; }
+.seg button[aria-pressed=true] { background:var(--accent); color:var(--accent-ink); font-weight:600; }
+.primary { width:100%; margin-top:14px; border:0; border-radius:8px; padding:12px; min-height:48px;
+  background:var(--accent); color:var(--accent-ink); font-weight:650; }
+.primary:disabled { opacity:.5; }
+.link { background:none; border:0; color:var(--accent); padding:6px 0; text-decoration:underline; cursor:pointer; }
+.icon-btn { background:none; border:1px solid var(--line); color:var(--ink); border-radius:8px; padding:6px 10px; min-height:36px; }
+.preview { font-size:14px; color:var(--muted); margin-top:8px; min-height:1.4em; }
+.status { font-size:14px; margin-top:10px; white-space:pre-wrap; }
+.status.bad { color:var(--bad); } .status.ok { color:var(--ok); } .status.warn { color:var(--warn); }
+table { width:100%; border-collapse:collapse; font-size:14px; font-variant-numeric:tabular-nums; }
+th, td { text-align:right; padding:6px 4px; border-bottom:1px solid var(--line); }
+th:first-child, td:first-child { text-align:left; }
+th { color:var(--muted); font-weight:600; font-size:12px; }
+.note { font-size:13px; color:var(--muted); margin:8px 0 0; }
+.hidden { display:none !important; }
+#reportWrap { position:fixed; inset:0; background:var(--bg); z-index:10; display:flex; flex-direction:column; }
+#reportWrap .bar { display:flex; justify-content:space-between; align-items:center;
+  padding:max(8px, env(safe-area-inset-top)) 16px 8px; border-bottom:1px solid var(--line); }
+#reportWrap iframe { flex:1; border:0; width:100%; background:#fff; }
+.spin { display:inline-block; width:12px; height:12px; border:2px solid var(--line); border-top-color:var(--accent);
+  border-radius:50%; animation:s 1s linear infinite; vertical-align:-1px; margin-right:6px; }
+@keyframes s { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Pellets</h1>
+    <button class="icon-btn" id="settingsBtn" aria-label="Settings">Settings</button>
+  </header>
+
+  <section class="card hidden" id="settings">
+    <h2>Connection</h2>
+    <label for="repo">Repository (owner/name)</label>
+    <input type="text" id="repo" placeholder="owner/pelletsverbrauch" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="token">Access token (fine-grained, this repo only)</label>
+    <input type="password" id="token" placeholder="github_pat_…" autocomplete="off">
+    <button class="primary" id="saveSettings">Save and load</button>
+    <p class="note">The token stays in this browser on this device. Permissions needed: Actions read and write, Contents read.</p>
+  </section>
+
+  <section class="card" id="summary">
+    <h2>Now</h2>
+    <div class="tiles">
+      <div class="tile"><div class="k">Stock today</div><div class="v" id="tStock">–</div><div class="r" id="tStockR"></div></div>
+      <div class="tile"><div class="k">To buy</div><div class="v" id="tBuy">–</div><div class="r" id="tBuyR"></div></div>
+      <div class="tile"><div class="k">Lasts season</div><div class="v" id="tCover">–</div><div class="r" id="tCoverR"></div></div>
+    </div>
+    <p class="note" id="asOf"></p>
+  </section>
+
+  <section class="card">
+    <h2>New entry</h2>
+    <div class="seg" role="group" aria-label="Entry type">
+      <button type="button" id="kUsed" aria-pressed="true">Bags used</button>
+      <button type="button" id="kStock" aria-pressed="false">Bags counted</button>
+    </div>
+    <label for="date">Date</label>
+    <input type="date" id="date">
+    <label for="bags" id="bagsLabel">Bags used since the last entry</label>
+    <input type="number" id="bags" inputmode="numeric" min="0" max="999" step="1">
+    <div class="preview" id="preview"></div>
+    <button class="primary" id="submit" disabled>Add entry</button>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card" id="feedback">
+    <h2>Last interval against the model</h2>
+    <div id="fbBody" class="note">–</div>
+  </section>
+
+  <section class="card">
+    <h2>Last entries</h2>
+    <table>
+      <thead><tr><th>Date</th><th>Days</th><th>Change</th><th>Stock</th><th>Bags/day</th></tr></thead>
+      <tbody id="ledgerRows"><tr><td colspan="5">–</td></tr></tbody>
+    </table>
+    <button class="link" id="openReport">Open full report</button>
+    <button class="link" id="refresh" style="float:right">Refresh</button>
+  </section>
+</main>
+
+<div id="reportWrap" class="hidden">
+  <div class="bar"><strong>Report</strong><button class="icon-btn" id="closeReport">Close</button></div>
+  <iframe id="reportFrame" title="Pellet report" sandbox="allow-same-origin"></iframe>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+const state = { kind: "used", ledger: [], results: null };
+
+// ---------------------------------------------------------------- formatting
+const fmt0 = x => Math.round(x).toString();
+const fmt1 = x => x.toFixed(1);
+const fmt2 = x => x.toFixed(2);
+const dmy = iso => { const [y, m, d] = iso.split("-"); return `${+d}.${+m}.${y}`; };
+const todayIso = () => { const t = new Date(); t.setMinutes(t.getMinutes() - t.getTimezoneOffset()); return t.toISOString().slice(0, 10); };
+const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+
+// ---------------------------------------------------------------- GitHub API
+function cfg() { return { repo: store.get("repo").trim(), token: store.get("token").trim() }; }
+
+async function gh(path, opts = {}) {
+  const { repo, token } = cfg();
+  if (!repo || !token) throw new Error("Set repository and token under Settings.");
+  const res = await fetch(`https://api.github.com/repos/${repo}${path}`, {
+    cache: "no-store", ...opts,
+    headers: { Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28",
+               Accept: opts.raw ? "application/vnd.github.raw+json" : "application/vnd.github+json",
+               ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+  });
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try { const j = await res.json(); if (j.message) msg += `: ${j.message}`; } catch {}
+    if (res.status === 401) msg += " (token wrong or expired)";
+    if (res.status === 404) msg += " (repository name wrong, or the token lacks access)";
+    throw new Error(msg);
+  }
+  return opts.raw ? res.text() : (res.status === 204 ? null : res.json());
+}
+const resultFile = name => gh(`/contents/${name}?ref=results&t=${Date.now()}`, { raw: true });
+
+// ---------------------------------------------------------------- loading
+function parseLedger(csv) {
+  return csv.trim().split(/\r?\n/).slice(1).map(l => {
+    const [date, change, stock] = l.split(",");
+    return { date, change: +change, stock: +stock };
+  });
+}
+
+async function loadAll() {
+  setStatus("", "");
+  try {
+    const [r, l] = await Promise.all([resultFile("results.json"), resultFile("ledger.csv")]);
+    state.results = JSON.parse(r);
+    state.ledger = parseLedger(l);
+    render();
+    try {
+      const s = JSON.parse(await resultFile("status.json"));
+      if (s.status !== "success") setStatus(`The last run (${s.event}) failed:\n${s.error || "no details"}`, "bad");
+    } catch {}
+  } catch (e) {
+    setStatus(e.message, "bad");
+  }
+}
+
+function render() {
+  const R = state.results, st = R.stock, cs = R.current_season;
+  $("tStock").textContent = fmt0(st.estimated_today_bags);
+  $("tStockR").textContent = st.counted_today ? "counted today" : `counted ${dmy(st.last_reading_date)}`;
+  $("tBuy").textContent = fmt0(cs.bags_to_buy.median);
+  $("tBuyR").textContent = `range ${fmt0(cs.bags_to_buy.min)}–${fmt0(cs.bags_to_buy.max)}`;
+  const ro = cs.run_out;
+  $("tCover").textContent = `${ro.n_members_covered}/${ro.n_members}`;
+  $("tCoverR").textContent = "weather years";
+  const runOut = ro.n_members_run_out
+    ? ` In the ${ro.n_members_run_out} years where stock runs out: around ${dmy(ro.median)} (${dmy(ro.earliest)} to ${dmy(ro.latest)}).`
+    : "";
+  $("asOf").textContent = `Season ${cs.label}, replayed over ${ro.n_members} past weather years; to buy is the median.` +
+    `${runOut} Run ${R.generated_at}.`;
+
+  const li = st.last_interval;
+  const meas = li.implied_use_bags / li.days, mod = li.modelled_use_bags / li.days;
+  const diff = li.modelled_use_bags > 0 ? (li.implied_use_bags / li.modelled_use_bags - 1) * 100 : null;
+  const body = $("fbBody");
+  body.textContent = "";
+  const p1 = document.createElement("div");
+  p1.textContent = `${dmy(li.start)} to ${dmy(li.end)}, ${li.days} days: ${li.implied_use_bags} bags used ` +
+    `(${fmt2(meas)}/day). Model: ${fmt1(li.modelled_use_bags)} bags (${fmt2(mod)}/day)` +
+    (diff === null ? "." : `, so you used ${Math.abs(diff).toFixed(0)} % ${diff < 0 ? "less" : "more"}.`);
+  body.appendChild(p1);
+  if (li.delivered_bags) {
+    const p = document.createElement("p"); p.className = "note";
+    p.textContent = `Includes a delivery of ${li.delivered_bags} bags.`; body.appendChild(p);
+  }
+  const weatherEnd = R.weather && R.weather.last;
+  if (weatherEnd && li.end > weatherEnd) {
+    const p = document.createElement("p"); p.className = "note";
+    p.textContent = "Weather for the last day is not in yet, so this interval enters the fit after tonight's run.";
+    body.appendChild(p);
+  }
+  const p2 = document.createElement("p"); p2.className = "note";
+  p2.textContent = `Typical model error ${fmt2(R.model.cv_mae_bags_per_day)} bags/day (cross-validated).`;
+  body.appendChild(p2);
+
+  const rows = state.ledger.slice(-3).reverse();
+  const tb = $("ledgerRows"); tb.textContent = "";
+  rows.forEach((row, i) => {
+    const all = state.ledger, idx = all.length - 1 - i, prev = all[idx - 1];
+    const days = prev ? daysBetween(prev.date, row.date) : 0;
+    const tr = document.createElement("tr");
+    [dmy(row.date), days, (row.change > 0 ? "+" : "") + row.change, row.stock,
+     days ? fmt2(row.change / days) : "–"].forEach(v => {
+      const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
+    tb.appendChild(tr);
+  });
+  updatePreview();
+}
+
+// ---------------------------------------------------------------- entry
+function setKind(kind) {
+  state.kind = kind;
+  $("kUsed").setAttribute("aria-pressed", kind === "used");
+  $("kStock").setAttribute("aria-pressed", kind === "stock");
+  $("bagsLabel").textContent = kind === "used" ? "Bags used since the last entry" : "Bags counted in store";
+  updatePreview();
+}
+
+function draft() {
+  const last = state.ledger[state.ledger.length - 1];
+  const date = $("date").value, raw = $("bags").value.trim();
+  if (!last) return { error: "Load the data first." };
+  if (!date) return { error: "" };
+  if (date > todayIso()) return { error: "The date is in the future." };
+  const days = daysBetween(last.date, date);
+  if (days <= 0) return { error: `The last entry is ${dmy(last.date)}; pick a later date.` };
+  if (raw === "" || !/^\d+$/.test(raw)) return { error: "" };
+  const n = +raw;
+  const change = state.kind === "used" ? -n : n - last.stock;
+  const stock = last.stock + change;
+  if (stock < 0) return { error: `That leaves ${stock} bags; the last count was ${last.stock}.` };
+  return { date, n, days, change, stock, last };
+}
+
+function updatePreview() {
+  const d = draft();
+  $("submit").disabled = !!d.error || d.error === "";
+  if (d.error !== undefined) { $("preview").textContent = d.error; return; }
+  if (d.change > 0) {
+    $("preview").textContent = `Stock ${d.last.stock} → ${d.stock}: a rise of ${d.change} bags. ` +
+      "This is accepted only if the delivery bill is already in pellet_purchases.csv.";
+    return;
+  }
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  $("preview").textContent = `${dmy(d.last.date)} to ${dmy(d.date)}: ${plural(-d.change, "bag")} in ${plural(d.days, "day")} ` +
+    `(${fmt2(-d.change / d.days)}/day), stock ${d.last.stock} → ${d.stock}.`;
+}
+
+function setStatus(text, cls, spinning) {
+  const el = $("status"); el.className = "status " + (cls || ""); el.textContent = "";
+  if (spinning) { const s = document.createElement("span"); s.className = "spin"; el.appendChild(s); }
+  el.appendChild(document.createTextNode(text));
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function submitEntry() {
+  const d = draft(); if (d.error !== undefined) return;
+  const id = Math.random().toString(36).slice(2, 10);
+  $("submit").disabled = true;
+  try {
+    setStatus("Sending…", "", true);
+    await gh("/actions/workflows/update.yml/dispatches", { method: "POST", body: JSON.stringify({
+      ref: "main", inputs: { kind: state.kind, bags: String(d.n), date: d.date, entry_id: id } }) });
+    const t0 = Date.now();
+    let run = null;
+    while (Date.now() - t0 < 12 * 60 * 1000) {
+      await sleep(5000);
+      const secs = Math.round((Date.now() - t0) / 1000);
+      const runs = await gh(`/actions/workflows/update.yml/runs?event=workflow_dispatch&per_page=10&t=${Date.now()}`);
+      run = (runs.workflow_runs || []).find(r => r.display_title === `entry ${id}`) || null;
+      if (run && run.status === "completed") break;
+      setStatus(run ? `Running the model… ${secs} s (usually 1–2 min)` : `Waiting for GitHub to start the run… ${secs} s`, "", true);
+    }
+    if (!run || run.status !== "completed") throw new Error("The run is taking long. Check back later with Refresh.");
+    await loadAll();
+    if (run.conclusion === "success") {
+      setStatus("Saved. Numbers below are updated.", "ok");
+      $("bags").value = ""; updatePreview();
+    } else {
+      let why = "";
+      try { const s = JSON.parse(await resultFile("status.json")); if (s.entry && s.entry.id === id) why = s.error || ""; } catch {}
+      setStatus(`Not saved: the run failed.\n${why}`, "bad");
+    }
+  } catch (e) {
+    setStatus(e.message, "bad");
+  } finally {
+    updatePreview();
+  }
+}
+
+// ---------------------------------------------------------------- report
+async function openReport() {
+  try {
+    setStatus("Loading report…", "", true);
+    $("reportFrame").srcdoc = await resultFile("report.html");
+    $("reportWrap").classList.remove("hidden");
+    setStatus("", "");
+  } catch (e) { setStatus(e.message, "bad"); }
+}
+
+// ---------------------------------------------------------------- wiring
+$("date").value = todayIso();
+$("date").max = todayIso();
+$("kUsed").onclick = () => setKind("used");
+$("kStock").onclick = () => setKind("stock");
+$("date").oninput = updatePreview;
+$("bags").oninput = updatePreview;
+$("submit").onclick = submitEntry;
+$("refresh").onclick = loadAll;
+$("openReport").onclick = openReport;
+$("closeReport").onclick = () => { $("reportWrap").classList.add("hidden"); $("reportFrame").srcdoc = ""; };
+$("settingsBtn").onclick = () => $("settings").classList.toggle("hidden");
+$("repo").value = store.get("repo");
+$("token").value = store.get("token");
+$("saveSettings").onclick = () => {
+  store.set("repo", $("repo").value.trim()); store.set("token", $("token").value.trim());
+  $("settings").classList.add("hidden"); loadAll();
+};
+if (!cfg().repo || !cfg().token) $("settings").classList.remove("hidden"); else loadAll();
+</script>
+</body>
+</html>
