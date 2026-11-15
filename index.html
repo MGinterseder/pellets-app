@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -14,7 +14,8 @@
   Phone front end for the private pellet repo (DEC-0013). This file holds no data and no
   secret: the GitHub token is typed in once and kept in this browser's localStorage only.
   Reads:  results branch (results.json, ledger.csv, status.json, report.html)
-  Writes: nothing directly; starts the "update" workflow, which adds the entry and reruns.
+  Writes: nothing directly; starts the "update" workflow, which adds the entry (or, with
+  replace=true, rewrites the newest ledger row) and reruns.
 -->
 <style>
 :root {
@@ -35,9 +36,10 @@ header { display:flex; align-items:center; justify-content:space-between; margin
 h1 { font-size:22px; margin:0; }
 h2 { font-size:15px; margin:0 0 8px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin:0 0 12px; }
-.tiles { display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; }
+.card.editing { border-color:var(--warn); }
+.tiles { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:8px; }
 .tile .k { font-size:12px; color:var(--muted); }
-.tile .v { font-size:24px; font-weight:650; font-variant-numeric:tabular-nums; }
+.tile .v { font-size:24px; font-weight:650; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .tile .r { font-size:12px; color:var(--muted); }
 label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
 input, button, select { font:inherit; }
@@ -53,17 +55,21 @@ input[type=date], input[type=number], input[type=text], input[type=password] {
 .primary { width:100%; margin-top:14px; border:0; border-radius:8px; padding:12px; min-height:48px;
   background:var(--accent); color:var(--accent-ink); font-weight:650; }
 .primary:disabled { opacity:.5; }
+.secondary { width:100%; margin-top:8px; border:1px solid var(--line); border-radius:8px; padding:10px; min-height:44px;
+  background:var(--bg); color:var(--ink); }
 .link { background:none; border:0; color:var(--accent); padding:6px 0; text-decoration:underline; cursor:pointer; }
 .icon-btn { background:none; border:1px solid var(--line); color:var(--ink); border-radius:8px; padding:6px 10px; min-height:36px; }
 .preview { font-size:14px; color:var(--muted); margin-top:8px; min-height:1.4em; }
 .status { font-size:14px; margin-top:10px; white-space:pre-wrap; }
 .status.bad { color:var(--bad); } .status.ok { color:var(--ok); } .status.warn { color:var(--warn); }
+.editnote { font-size:14px; color:var(--warn); margin:0 0 8px; }
 table { width:100%; border-collapse:collapse; font-size:14px; font-variant-numeric:tabular-nums; }
 th, td { text-align:right; padding:6px 4px; border-bottom:1px solid var(--line); }
 th:first-child, td:first-child { text-align:left; }
 th { color:var(--muted); font-weight:600; font-size:12px; }
 .note { font-size:13px; color:var(--muted); margin:8px 0 0; }
 .hidden { display:none !important; }
+.tablelinks { display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; }
 #reportWrap { position:fixed; inset:0; background:var(--bg); z-index:10; display:flex; flex-direction:column; }
 #reportWrap .bar { display:flex; justify-content:space-between; align-items:center;
   padding:max(8px, env(safe-area-inset-top)) 16px 8px; border-bottom:1px solid var(--line); }
@@ -77,68 +83,73 @@ th { color:var(--muted); font-weight:600; font-size:12px; }
 <main>
   <header>
     <h1>Pellets</h1>
-    <button class="icon-btn" id="settingsBtn" aria-label="Settings">Settings</button>
+    <button class="icon-btn" id="settingsBtn" aria-label="Einstellungen">Einstellungen</button>
   </header>
 
   <section class="card hidden" id="settings">
-    <h2>Connection</h2>
-    <label for="repo">Repository (owner/name)</label>
+    <h2>Verbindung</h2>
+    <label for="repo">Repository (Besitzer/Name)</label>
     <input type="text" id="repo" placeholder="owner/pelletsverbrauch" autocapitalize="off" autocorrect="off" spellcheck="false">
-    <label for="token">Access token (fine-grained, this repo only)</label>
+    <label for="token">Zugriffstoken (fine-grained, nur dieses Repository)</label>
     <input type="password" id="token" placeholder="github_pat_…" autocomplete="off">
-    <button class="primary" id="saveSettings">Save and load</button>
-    <p class="note">The token stays in this browser on this device. Permissions needed: Actions read and write, Contents read.</p>
+    <button class="primary" id="saveSettings">Speichern und laden</button>
+    <p class="note">Das Token bleibt in diesem Browser auf diesem Gerät. Nötige Rechte: Actions lesen und schreiben, Contents lesen.</p>
   </section>
 
   <section class="card" id="summary">
-    <h2>Now</h2>
+    <h2>Aktuell</h2>
     <div class="tiles">
-      <div class="tile"><div class="k">Stock today</div><div class="v" id="tStock">–</div><div class="r" id="tStockR"></div></div>
-      <div class="tile"><div class="k">To buy</div><div class="v" id="tBuy">–</div><div class="r" id="tBuyR"></div></div>
-      <div class="tile"><div class="k">Lasts season</div><div class="v" id="tCover">–</div><div class="r" id="tCoverR"></div></div>
+      <div class="tile"><div class="k">Bestand heute</div><div class="v" id="tStock">–</div><div class="r" id="tStockR"></div></div>
+      <div class="tile"><div class="k">Verbrauch</div><div class="v" id="tRate">–</div><div class="r" id="tRateR"></div></div>
+      <div class="tile"><div class="k">Reicht bis</div><div class="v" id="tEmpty">–</div><div class="r" id="tEmptyR"></div></div>
     </div>
     <p class="note" id="asOf"></p>
   </section>
 
-  <section class="card">
-    <h2>New entry</h2>
-    <div class="seg" role="group" aria-label="Entry type">
-      <button type="button" id="kUsed" aria-pressed="true">Bags used</button>
-      <button type="button" id="kStock" aria-pressed="false">Bags counted</button>
+  <section class="card" id="entryCard">
+    <h2 id="entryTitle">Neuer Eintrag</h2>
+    <p class="editnote hidden" id="editNote"></p>
+    <div class="seg" role="group" aria-label="Art des Eintrags">
+      <button type="button" id="kUsed" aria-pressed="true">Säcke verbraucht</button>
+      <button type="button" id="kStock" aria-pressed="false">Säcke gezählt</button>
     </div>
-    <label for="date">Date (dd.mm.yyyy)</label>
+    <label for="date">Datum (TT.MM.JJJJ)</label>
     <div class="daterow">
       <input type="text" id="date" inputmode="decimal" placeholder="15.11.2026" autocomplete="off" maxlength="10">
-      <button type="button" class="chip" id="dYesterday">Yesterday</button>
-      <button type="button" class="chip" id="dToday">Today</button>
+      <button type="button" class="chip" id="dYesterday">Gestern</button>
+      <button type="button" class="chip" id="dToday">Heute</button>
     </div>
-    <label for="bags" id="bagsLabel">Bags used since the last entry</label>
+    <label for="bags" id="bagsLabel">Säcke verbraucht seit dem letzten Eintrag (0 = keine Nutzung)</label>
     <input type="number" id="bags" inputmode="numeric" min="0" max="999" step="1">
     <div class="preview" id="preview"></div>
-    <button class="primary" id="submit" disabled>Add entry</button>
+    <button class="primary" id="submit" disabled>Eintrag hinzufügen</button>
+    <button class="secondary hidden" id="cancelEdit" type="button">Abbrechen</button>
     <div class="status" id="status" role="status" aria-live="polite"></div>
   </section>
 
   <section class="card" id="feedback">
-    <h2>Last interval against the model</h2>
+    <h2>Letzter Zeitraum im Vergleich zum Modell</h2>
     <div id="fbBody" class="note">–</div>
   </section>
 
   <section class="card">
-    <h2>Last entries</h2>
+    <h2>Letzte Einträge</h2>
     <table>
-      <thead><tr><th>Date</th><th>Days</th><th>Change</th><th>Stock</th><th>Bags/day</th></tr></thead>
+      <thead><tr><th>Datum</th><th>Tage</th><th>Änderung</th><th>Bestand</th><th>Säcke/Tag</th></tr></thead>
       <tbody id="ledgerRows"><tr><td colspan="5">–</td></tr></tbody>
     </table>
-    <button class="link" id="openReport">Open full report</button>
-    <button class="link" id="refresh" style="float:right">Refresh</button>
+    <div class="tablelinks">
+      <button class="link" id="editLast">Letzten Eintrag ändern</button>
+      <button class="link" id="refresh">Aktualisieren</button>
+    </div>
+    <button class="link" id="openReport">Vollständigen Bericht öffnen</button>
   </section>
   <p class="note" id="version"></p>
 </main>
 
 <div id="reportWrap" class="hidden">
-  <div class="bar"><strong>Report</strong><button class="icon-btn" id="closeReport">Close</button></div>
-  <iframe id="reportFrame" title="Pellet report" sandbox="allow-same-origin"></iframe>
+  <div class="bar"><strong>Bericht</strong><button class="icon-btn" id="closeReport">Schließen</button></div>
+  <iframe id="reportFrame" title="Pellets-Bericht" sandbox="allow-same-origin"></iframe>
 </div>
 
 <script>
@@ -148,16 +159,22 @@ const store = {
   get(k) { try { return localStorage.getItem(k) || ""; } catch { return ""; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
-const state = { kind: "used", ledger: [], results: null };
+// edit = true: the form rewrites the newest ledger row, measured from the row before it.
+const state = { kind: "used", ledger: [], results: null, edit: false };
 
-// ---------------------------------------------------------------- formatting
-const fmt0 = x => Math.round(x).toString();
-const fmt1 = x => x.toFixed(1);
-const fmt2 = x => x.toFixed(2);
+// ---------------------------------------------------------------- formatting (German: decimal comma)
+const num = (x, d) => x.toLocaleString("de-AT", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmt0 = x => num(x, 0);
+const fmt1 = x => num(x, 1);
+const fmt2 = x => num(x, 2);
 const dmy = iso => { const [y, m, d] = iso.split("-"); return `${+d}.${+m}.${y}`; };
+const dm = iso => { const [, m, d] = iso.split("-"); return `${+d}.${+m}.`; };
 const todayIso = () => { const t = new Date(); t.setMinutes(t.getMinutes() - t.getTimezoneOffset()); return t.toISOString().slice(0, 10); };
 const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
 const isoDaysAgo = n => { const t = new Date(Date.parse(todayIso()) - n * 86400000); return t.toISOString().slice(0, 10); };
+const bagsWord = n => `${fmt0(n)} ${n === 1 ? "Sack" : "Säcke"}`;
+const daysWord = n => `${n} ${n === 1 ? "Tag" : "Tage"}`;     // "15 Tage"
+const inDaysWord = n => `${n} ${n === 1 ? "Tag" : "Tagen"}`;  // "in 15 Tagen"
 // European date entry: d.m.yyyy, with . , / - or space as separator; a two-digit year is 20yy,
 // and a missing year is the current one. Returns ISO yyyy-mm-dd, or null if it is no real date.
 function parseEuDate(text) {
@@ -170,7 +187,7 @@ function parseEuDate(text) {
   const t = new Date(iso + "T00:00:00Z");
   return !isNaN(t) && t.getUTCDate() === d && t.getUTCMonth() + 1 === mo ? iso : null;
 }
-const APP_VERSION = "2026-11-15d";
+const APP_VERSION = "2026-11-15e";
 
 // ---------------------------------------------------------------- GitHub API
 // The API path needs exactly "owner/name". Anything else (a pasted github.com address, a
@@ -187,8 +204,8 @@ function cfg() { return { repo: cleanRepo(store.get("repo")), token: cleanToken(
 
 async function gh(path, opts = {}) {
   const { repo, token } = cfg();
-  if (!repo || !token) throw new Error("Set repository and token under Settings.");
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`Repository "${repo}" is not in the form owner/name.`);
+  if (!repo || !token) throw new Error("Repository und Token unter Einstellungen eintragen.");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`Repository „${repo}“ hat nicht die Form Besitzer/Name.`);
   // No `cache: "no-store"`: Firefox then sends Cache-Control and Pragma, which GitHub's CORS
   // rules do not allow, and the request fails as a NetworkError. Freshness comes from the
   // unique t= parameter on every read instead.
@@ -206,8 +223,8 @@ async function gh(path, opts = {}) {
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
     try { const j = await res.json(); if (j.message) msg += `: ${j.message}`; } catch {}
-    if (res.status === 401) msg += " (token wrong or expired)";
-    if (res.status === 404) msg += " (repository name wrong, or the token lacks access)";
+    if (res.status === 401) msg += " (Token falsch oder abgelaufen)";
+    if (res.status === 404) msg += " (Repository-Name falsch, oder das Token hat keinen Zugriff)";
     throw new Error(msg);
   }
   return opts.raw ? res.text() : (res.status === 204 ? null : res.json());
@@ -217,18 +234,18 @@ async function gh(path, opts = {}) {
 async function diagnoseNetwork(err) {
   let simpleOk = false;
   try { simpleOk = (await fetch(`https://api.github.com/zen?t=${Date.now()}`)).ok; } catch {}
-  if (!navigator.onLine) return "No network connection.";
-  if (!simpleOk) return "This browser cannot reach api.github.com at all. A content blocker, tracking " +
-    "protection or private DNS on this phone may be blocking it; allow api.github.com and retry.";
+  if (!navigator.onLine) return "Keine Netzwerkverbindung.";
+  if (!simpleOk) return "Dieser Browser erreicht api.github.com überhaupt nicht. Ein Inhaltsblocker, " +
+    "Tracking-Schutz oder privates DNS auf diesem Gerät blockiert es vielleicht; api.github.com zulassen und erneut versuchen.";
   // Same CORS pre-check as the real request, without the token: if this fails too, the path is the problem.
   const { repo } = cfg();
   let pathOk = false;
   try { pathOk = (await fetch(`https://api.github.com/repos/${repo}?t=${Date.now()}`,
     { headers: { "X-GitHub-Api-Version": "2022-11-28" } })).status !== 0; } catch {}
-  if (!pathOk) return `GitHub refused the request for repository "${repo}". ` +
-    "Check under Settings that it reads exactly MGinterseder/pelletsverbrauch.";
-  return `GitHub is reachable and "${repo}" is fine, but the request with the token was blocked (${err.message}). ` +
-    "Re-paste the token under Settings; if that does not help, try with browser add-ons off for this page.";
+  if (!pathOk) return `GitHub hat die Anfrage für das Repository „${repo}“ abgelehnt. ` +
+    "Unter Einstellungen prüfen, dass dort genau MGinterseder/pelletsverbrauch steht.";
+  return `GitHub ist erreichbar und „${repo}“ stimmt, aber die Anfrage mit dem Token wurde blockiert (${err.message}). ` +
+    "Das Token unter Einstellungen neu einfügen; hilft das nicht, Browser-Erweiterungen für diese Seite abschalten.";
 }
 
 const resultFile = name => gh(`/contents/${name}?ref=results&t=${Date.now()}`, { raw: true });
@@ -250,7 +267,7 @@ async function loadAll() {
     render();
     try {
       const s = JSON.parse(await resultFile("status.json"));
-      if (s.status !== "success") setStatus(`The last run (${s.event}) failed:\n${s.error || "no details"}`, "bad");
+      if (s.status !== "success") setStatus(`Der letzte Lauf (${s.event}) ist fehlgeschlagen:\n${s.error || "keine Details"}`, "bad");
     } catch {}
   } catch (e) {
     setStatus(e.message, "bad");
@@ -258,43 +275,60 @@ async function loadAll() {
 }
 
 function render() {
-  const R = state.results, st = R.stock, cs = R.current_season;
-  $("tStock").textContent = fmt0(st.estimated_today_bags);
-  $("tStockR").textContent = st.counted_today ? "counted today" : `counted ${dmy(st.last_reading_date)}`;
-  $("tBuy").textContent = fmt0(cs.bags_to_buy.median);
-  $("tBuyR").textContent = `range ${fmt0(cs.bags_to_buy.min)}–${fmt0(cs.bags_to_buy.max)}`;
-  const ro = cs.run_out;
-  $("tCover").textContent = `${ro.n_members_covered}/${ro.n_members}`;
-  $("tCoverR").textContent = "weather years";
-  const runOut = ro.n_members_run_out
-    ? ` In the ${ro.n_members_run_out} years where stock runs out: around ${dmy(ro.median)} (${dmy(ro.earliest)} to ${dmy(ro.latest)}).`
-    : "";
-  $("asOf").textContent = `Season ${cs.label}, replayed over ${ro.n_members} past weather years; to buy is the median.` +
-    `${runOut} Run ${R.generated_at}.`;
+  const R = state.results, st = R.stock, cs = R.current_season, ro = cs.run_out, li = st.last_interval;
 
-  const li = st.last_interval;
-  const meas = li.implied_use_bags / li.days, mod = li.modelled_use_bags / li.days;
-  const diff = li.modelled_use_bags > 0 ? (li.implied_use_bags / li.modelled_use_bags - 1) * 100 : null;
+  // Stock today: the last count, less modelled use since, plus deliveries after it.
+  $("tStock").textContent = fmt0(st.estimated_today_bags);
+  $("tStockR").textContent = st.counted_today ? "heute gezählt"
+    : `geschätzt; gezählt ${dm(st.last_reading_date)}: ${st.last_reading_bags}`;
+
+  // Burn rate: measured over the last ledger interval.
+  $("tRate").textContent = fmt2(li.implied_use_bags / li.days);
+  $("tRateR").textContent = `Säcke/Tag, ${dm(li.start)}–${dm(li.end)}`;
+
+  // Depletion: the middle weather year of the ensemble (results.json from 2026-11-15 on).
+  const n = ro.n_members, covered = ro.n_members_covered;
+  if (ro.median_all === undefined) {
+    $("tEmpty").textContent = "–";
+    $("tEmptyR").textContent = "nach dem nächsten Lauf";
+  } else if (ro.median_all) {
+    $("tEmpty").textContent = dm(ro.median_all);
+    $("tEmptyR").textContent = `${ro.median_all.slice(0, 4)}; Spanne ${dm(ro.earliest)}–${dm(ro.latest)}`;
+  } else {
+    $("tEmpty").textContent = `> ${dm(cs.end)}`;
+    $("tEmptyR").textContent = `Saisonende; reicht in ${covered} von ${n} Wetterjahren` +
+      (ro.n_members_run_out ? `; sonst leer ab ${dm(ro.earliest)}` : "");
+  }
+
+  const nd = cs.next_days_bags_per_day;
+  const parts = [`Zu kaufen bis ${dmy(cs.end)}: ${bagsWord(Math.round(cs.bags_to_buy.median))} ` +
+    `(Median über ${n} Wetterjahre, Spanne ${fmt0(cs.bags_to_buy.min)}–${fmt0(cs.bags_to_buy.max)}).`];
+  if (nd) parts.push(`Modell für die nächsten ${nd.days} Tage: ${fmt2(nd.median)} Säcke/Tag.`);
+  if (ro.median_all && ro.n_members_run_out < n) parts.push(`In ${covered} von ${n} Wetterjahren reicht der Bestand bis ${dmy(cs.end)}.`);
+  const [gd, gt] = R.generated_at.split(" ");
+  parts.push(`Berechnet ${dmy(gd)} ${gt || ""}.`);
+  $("asOf").textContent = parts.join(" ");
+
+  // Last interval against the model.
   const body = $("fbBody");
   body.textContent = "";
-  const p1 = document.createElement("div");
-  p1.textContent = `${dmy(li.start)} to ${dmy(li.end)}, ${li.days} days: ${li.implied_use_bags} bags used ` +
-    `(${fmt2(meas)}/day). Model: ${fmt1(li.modelled_use_bags)} bags (${fmt2(mod)}/day)` +
-    (diff === null ? "." : `, so you used ${Math.abs(diff).toFixed(0)} % ${diff < 0 ? "less" : "more"}.`);
-  body.appendChild(p1);
-  if (li.delivered_bags) {
-    const p = document.createElement("p"); p.className = "note";
-    p.textContent = `Includes a delivery of ${li.delivered_bags} bags.`; body.appendChild(p);
+  const add = (text, cls) => { const p = document.createElement(cls ? "p" : "div"); if (cls) p.className = cls; p.textContent = text; body.appendChild(p); };
+  const head = `${dmy(li.start)} bis ${dmy(li.end)}, ${daysWord(li.days)}: `;
+  if (li.implied_use_bags === 0) {
+    add(head + "keine Nutzung (0 Säcke).");
+    add("Zeiträume ohne Verbrauch gehen nicht in die Modellanpassung ein.", "note");
+  } else {
+    const meas = li.implied_use_bags / li.days, mod = li.modelled_use_bags / li.days;
+    const diff = li.modelled_use_bags > 0 ? (li.implied_use_bags / li.modelled_use_bags - 1) * 100 : null;
+    add(head + `${bagsWord(li.implied_use_bags)} verbraucht (${fmt2(meas)}/Tag). ` +
+      `Modell: ${fmt1(li.modelled_use_bags)} Säcke (${fmt2(mod)}/Tag)` +
+      (diff === null ? "." : `, also ${fmt0(Math.abs(diff))} % ${diff < 0 ? "weniger" : "mehr"} als erwartet.`));
   }
+  if (li.delivered_bags) add(`Enthält eine Lieferung von ${bagsWord(li.delivered_bags)}.`, "note");
   const weatherEnd = R.weather && R.weather.last;
-  if (weatherEnd && li.end > weatherEnd) {
-    const p = document.createElement("p"); p.className = "note";
-    p.textContent = "Weather for the last day is not in yet, so this interval enters the fit after tonight's run.";
-    body.appendChild(p);
-  }
-  const p2 = document.createElement("p"); p2.className = "note";
-  p2.textContent = `Typical model error ${fmt2(R.model.cv_mae_bags_per_day)} bags/day (cross-validated).`;
-  body.appendChild(p2);
+  if (weatherEnd && li.end > weatherEnd && li.implied_use_bags !== 0)
+    add("Das Wetter für den letzten Tag fehlt noch; der Zeitraum geht nach dem nächtlichen Lauf in die Anpassung ein.", "note");
+  add(`Typischer Modellfehler ${fmt2(R.model.cv_mae_bags_per_day)} Säcke/Tag (kreuzvalidiert).`, "note");
 
   const rows = state.ledger.slice(-3).reverse();
   const tb = $("ledgerRows"); tb.textContent = "";
@@ -307,6 +341,7 @@ function render() {
       const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
     tb.appendChild(tr);
   });
+  $("editLast").disabled = state.ledger.length < 2;
   updatePreview();
 }
 
@@ -315,40 +350,83 @@ function setKind(kind) {
   state.kind = kind;
   $("kUsed").setAttribute("aria-pressed", kind === "used");
   $("kStock").setAttribute("aria-pressed", kind === "stock");
-  $("bagsLabel").textContent = kind === "used" ? "Bags used since the last entry" : "Bags counted in store";
+  $("bagsLabel").textContent = kind === "used"
+    ? `Säcke verbraucht seit ${state.edit ? "dem vorletzten" : "dem letzten"} Eintrag (0 = keine Nutzung)`
+    : "Säcke im Lager gezählt";
   updatePreview();
 }
 
+// Newest row and the row the entry is measured from.
+function base() {
+  const L = state.ledger;
+  return state.edit ? { from: L[L.length - 2], old: L[L.length - 1] } : { from: L[L.length - 1], old: null };
+}
+
+function startEdit() {
+  const L = state.ledger;
+  if (L.length < 2) return;
+  state.edit = true;
+  const old = L[L.length - 1];
+  setDate(old.date);
+  if (old.change <= 0) { setKind("used"); $("bags").value = String(-old.change); }
+  else { setKind("stock"); $("bags").value = String(old.stock); }
+  $("entryTitle").textContent = "Letzten Eintrag ändern";
+  $("editNote").textContent = `Ersetzt den Eintrag vom ${dmy(old.date)} (${old.change > 0 ? "+" : ""}${old.change}, Bestand ${old.stock}).`;
+  $("editNote").classList.remove("hidden");
+  $("cancelEdit").classList.remove("hidden");
+  $("entryCard").classList.add("editing");
+  $("submit").textContent = "Eintrag ersetzen";
+  setStatus("", "");
+  updatePreview();
+  $("entryCard").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function endEdit() {
+  state.edit = false;
+  $("entryTitle").textContent = "Neuer Eintrag";
+  $("editNote").classList.add("hidden");
+  $("cancelEdit").classList.add("hidden");
+  $("entryCard").classList.remove("editing");
+  $("submit").textContent = "Eintrag hinzufügen";
+  $("bags").value = "";
+  setDate(todayIso());
+  setKind(state.kind);
+}
+
 function draft() {
-  const last = state.ledger[state.ledger.length - 1];
+  const { from, old } = base();
   const dateText = $("date").value.trim(), raw = $("bags").value.trim();
-  if (!last) return { error: "Load the data first." };
+  if (!from) return { error: "Zuerst die Daten laden." };
   if (!dateText) return { error: "" };
   const date = parseEuDate(dateText);
-  if (!date) return { error: "Enter the date as dd.mm.yyyy, e.g. 15.11.2026." };
-  if (date > todayIso()) return { error: "The date is in the future." };
-  const days = daysBetween(last.date, date);
-  if (days <= 0) return { error: `The last entry is ${dmy(last.date)}; pick a later date.` };
+  if (!date) return { error: "Datum als TT.MM.JJJJ eingeben, z. B. 15.11.2026." };
+  if (date > todayIso()) return { error: "Das Datum liegt in der Zukunft." };
+  const days = daysBetween(from.date, date);
+  if (days <= 0) return { error: `Der ${state.edit ? "vorletzte" : "letzte"} Eintrag ist vom ${dmy(from.date)}; ein späteres Datum wählen.` };
   if (raw === "" || !/^\d+$/.test(raw)) return { error: "" };
   const n = +raw;
-  const change = state.kind === "used" ? -n : n - last.stock;
-  const stock = last.stock + change;
-  if (stock < 0) return { error: `That leaves ${stock} bags; the last count was ${last.stock}.` };
-  return { date, n, days, change, stock, last };
+  const change = state.kind === "used" ? -n : n - from.stock;
+  const stock = from.stock + change;
+  if (stock < 0) return { error: `Das ergäbe ${stock} Säcke; der Bestand am ${dmy(from.date)} war ${from.stock}.` };
+  if (old && old.date === date && old.change === change && old.stock === stock)
+    return { error: "Unverändert; Datum oder Säcke ändern." };
+  return { date, n, days, change, stock, from };
 }
 
 function updatePreview() {
   const d = draft();
-  $("submit").disabled = !!d.error || d.error === "";
+  $("submit").disabled = d.error !== undefined;
   if (d.error !== undefined) { $("preview").textContent = d.error; return; }
+  const span = `${dmy(d.from.date)} bis ${dmy(d.date)}`;
   if (d.change > 0) {
-    $("preview").textContent = `Stock ${d.last.stock} → ${d.stock}: a rise of ${d.change} bags. ` +
-      "This is accepted only if the delivery bill is already in pellet_purchases.csv.";
-    return;
+    $("preview").textContent = `Bestand ${d.from.stock} → ${d.stock}: plus ${bagsWord(d.change)}. ` +
+      "Wird nur angenommen, wenn die Lieferrechnung schon in pellet_purchases.csv steht.";
+  } else if (d.change === 0) {
+    $("preview").textContent = `${span}: keine Nutzung in ${inDaysWord(d.days)}, Bestand bleibt ${d.stock}.`;
+  } else {
+    $("preview").textContent = `${span}: ${bagsWord(-d.change)} in ${inDaysWord(d.days)} ` +
+      `(${fmt2(-d.change / d.days)}/Tag), Bestand ${d.from.stock} → ${d.stock}.`;
   }
-  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
-  $("preview").textContent = `${dmy(d.last.date)} to ${dmy(d.date)}: ${plural(-d.change, "bag")} in ${plural(d.days, "day")} ` +
-    `(${fmt2(-d.change / d.days)}/day), stock ${d.last.stock} → ${d.stock}.`;
 }
 
 function setStatus(text, cls, spinning) {
@@ -362,11 +440,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function submitEntry() {
   const d = draft(); if (d.error !== undefined) return;
   const id = Math.random().toString(36).slice(2, 10);
+  const replacing = state.edit;
   $("submit").disabled = true;
   try {
-    setStatus("Sending…", "", true);
+    setStatus("Wird gesendet…", "", true);
     await gh("/actions/workflows/update.yml/dispatches", { method: "POST", body: JSON.stringify({
-      ref: "main", inputs: { kind: state.kind, bags: String(d.n), date: d.date, entry_id: id } }) });
+      ref: "main", inputs: { kind: state.kind, bags: String(d.n), date: d.date, entry_id: id,
+                             replace: replacing ? "true" : "false" } }) });
     const t0 = Date.now();
     let run = null;
     while (Date.now() - t0 < 12 * 60 * 1000) {
@@ -375,17 +455,17 @@ async function submitEntry() {
       const runs = await gh(`/actions/workflows/update.yml/runs?event=workflow_dispatch&per_page=10&t=${Date.now()}`);
       run = (runs.workflow_runs || []).find(r => r.display_title === `entry ${id}`) || null;
       if (run && run.status === "completed") break;
-      setStatus(run ? `Running the model… ${secs} s (usually 1–2 min)` : `Waiting for GitHub to start the run… ${secs} s`, "", true);
+      setStatus(run ? `Modell rechnet… ${secs} s (meist 1–2 min)` : `Warte, bis GitHub den Lauf startet… ${secs} s`, "", true);
     }
-    if (!run || run.status !== "completed") throw new Error("The run is taking long. Check back later with Refresh.");
+    if (!run || run.status !== "completed") throw new Error("Der Lauf dauert lange. Später mit Aktualisieren nachsehen.");
     await loadAll();
     if (run.conclusion === "success") {
-      setStatus("Saved. Numbers below are updated.", "ok");
-      $("bags").value = ""; updatePreview();
+      if (replacing) endEdit(); else $("bags").value = "";
+      setStatus(replacing ? "Eintrag ersetzt. Die Zahlen sind aktualisiert." : "Gespeichert. Die Zahlen sind aktualisiert.", "ok");
     } else {
       let why = "";
       try { const s = JSON.parse(await resultFile("status.json")); if (s.entry && s.entry.id === id) why = s.error || ""; } catch {}
-      setStatus(`Not saved: the run failed.\n${why}`, "bad");
+      setStatus(`Nicht gespeichert: der Lauf ist fehlgeschlagen.\n${why}`, "bad");
     }
   } catch (e) {
     setStatus(e.message, "bad");
@@ -397,7 +477,7 @@ async function submitEntry() {
 // ---------------------------------------------------------------- report
 async function openReport() {
   try {
-    setStatus("Loading report…", "", true);
+    setStatus("Bericht wird geladen…", "", true);
     $("reportFrame").srcdoc = await resultFile("report.html");
     $("reportWrap").classList.remove("hidden");
     setStatus("", "");
@@ -405,16 +485,18 @@ async function openReport() {
 }
 
 // ---------------------------------------------------------------- wiring
-const setDate = iso => { $("date").value = dmy(iso).split(".").map((p, i) => i < 2 ? p.padStart(2, "0") : p).join("."); updatePreview(); };
+function setDate(iso) { $("date").value = dmy(iso).split(".").map((p, i) => i < 2 ? p.padStart(2, "0") : p).join("."); updatePreview(); }
 setDate(todayIso());
 $("dToday").onclick = () => setDate(todayIso());
 $("dYesterday").onclick = () => setDate(isoDaysAgo(1));
-$("version").textContent = `App version ${APP_VERSION}`;
+$("version").textContent = `App-Version ${APP_VERSION}`;
 $("kUsed").onclick = () => setKind("used");
 $("kStock").onclick = () => setKind("stock");
 $("date").oninput = updatePreview;
 $("bags").oninput = updatePreview;
 $("submit").onclick = submitEntry;
+$("editLast").onclick = startEdit;
+$("cancelEdit").onclick = () => { endEdit(); setStatus("", ""); };
 $("refresh").onclick = loadAll;
 $("openReport").onclick = openReport;
 $("closeReport").onclick = () => { $("reportWrap").classList.add("hidden"); $("reportFrame").srcdoc = ""; };
