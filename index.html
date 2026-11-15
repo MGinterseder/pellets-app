@@ -21,13 +21,24 @@
 :root {
   --bg:#f6f5f0; --card:#ffffff; --ink:#171717; --muted:#5f5f5f; --line:#e2e1d8;
   --accent:#0E6B54; --accent-ink:#ffffff; --bad:#b3261e; --warn:#8a5a00; --ok:#0E6B54;
+  /* Chart colours by quantity, as in the report (build_report.py C): measured, model, stock, context. */
+  --c-measured:#171717; --c-model:#0E6B54; --c-stock:#2A78D6; --c-context:#595959;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg:#121412; --card:#1c1f1d; --ink:#ecebe6; --muted:#a3a39c; --line:#30342f;
     --accent:#43B596; --accent-ink:#0b1a14; --bad:#ff8a80; --warn:#f0b35a; --ok:#43B596;
+    --c-measured:#ecebe6; --c-model:#43B596; --c-stock:#6FA8EC; --c-context:#a3a39c;
   }
 }
+.chart { width:100%; margin-top:6px; }
+.chart svg { display:block; width:100%; height:auto; overflow:visible; }
+.chart text { font-size:11px; fill:var(--muted); font-variant-numeric:tabular-nums; }
+.chartcap { font-size:14px; margin:14px 0 0; }
+.chartcap:first-of-type { margin-top:10px; }
+.legend { display:flex; flex-wrap:wrap; gap:2px 12px; font-size:12px; color:var(--muted); margin-top:4px; }
+.legend span { display:inline-flex; align-items:center; gap:5px; }
+.legend svg { width:18px; height:10px; flex:none; }
 * { box-sizing:border-box; }
 html, body { margin:0; background:var(--bg); color:var(--ink);
   font:16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -132,6 +143,21 @@ th { color:var(--muted); font-weight:600; font-size:12px; }
     <div id="fbBody" class="note">–</div>
   </section>
 
+  <section class="card" id="charts">
+    <h2>Verlauf</h2>
+    <div class="seg" role="group" aria-label="Zeitraum der Diagramme">
+      <button type="button" id="wSeason" aria-pressed="true">Diese Saison</button>
+      <button type="button" id="wAll" aria-pressed="false">Seit Vorsaison</button>
+    </div>
+    <p class="chartcap">Verbrauch: gemessen je Zeitraum zwischen zwei Einträgen, dazu das Modell.</p>
+    <div class="chart" id="chartUse"></div>
+    <div class="legend" id="legendUse"></div>
+    <p class="chartcap">Bestand: gezählt, und wie er sich nach dem Modell weiter entwickelt.</p>
+    <div class="chart" id="chartStock"></div>
+    <div class="legend" id="legendStock"></div>
+    <p class="note hidden" id="chartsMissing">Die Diagramme erscheinen nach dem nächsten Lauf (nachts oder nach einem Eintrag).</p>
+  </section>
+
   <section class="card">
     <h2>Letzte Einträge</h2>
     <table>
@@ -160,7 +186,7 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
 // edit = true: the form rewrites the newest ledger row, measured from the row before it.
-const state = { kind: "used", ledger: [], results: null, edit: false };
+const state = { kind: "used", ledger: [], results: null, edit: false, charts: null, window: "season" };
 
 // ---------------------------------------------------------------- formatting (German: decimal comma)
 const num = (x, d) => x.toLocaleString("de-AT", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -187,7 +213,7 @@ function parseEuDate(text) {
   const t = new Date(iso + "T00:00:00Z");
   return !isNaN(t) && t.getUTCDate() === d && t.getUTCMonth() + 1 === mo ? iso : null;
 }
-const APP_VERSION = "2026-11-15e";
+const APP_VERSION = "2026-11-15f";
 
 // ---------------------------------------------------------------- GitHub API
 // The API path needs exactly "owner/name". Anything else (a pasted github.com address, a
@@ -258,12 +284,29 @@ function parseLedger(csv) {
   });
 }
 
+function parseCsv(text) {
+  const [head, ...rows] = text.trim().split(/\r?\n/);
+  const keys = head.split(",");
+  return rows.map(l => { const v = l.split(","), o = {}; keys.forEach((k, i) => o[k] = v[i]); return o; });
+}
+// Chart inputs; missing until a run with the publishing step that copies them (null = not there).
+const CHART_FILES = { history: "modelled_history.csv", band: "forecast_daily_band.csv",
+                      proj: "stock_projection.csv", path: "stock_path.csv", iv: "intervals.csv" };
+async function loadCharts() {
+  const out = {};
+  await Promise.all(Object.entries(CHART_FILES).map(async ([k, f]) => {
+    try { out[k] = parseCsv(await resultFile(f)); } catch { out[k] = null; }
+  }));
+  return out;
+}
+
 async function loadAll() {
   setStatus("", "");
   try {
-    const [r, l] = await Promise.all([resultFile("results.json"), resultFile("ledger.csv")]);
+    const [r, l, c] = await Promise.all([resultFile("results.json"), resultFile("ledger.csv"), loadCharts()]);
     state.results = JSON.parse(r);
     state.ledger = parseLedger(l);
+    state.charts = c;
     render();
     try {
       const s = JSON.parse(await resultFile("status.json"));
@@ -342,7 +385,168 @@ function render() {
     tb.appendChild(tr);
   });
   $("editLast").disabled = state.ledger.length < 2;
+  renderCharts();
   updatePreview();
+}
+
+// ---------------------------------------------------------------- charts (inline SVG, drawn at the card's width)
+const MONTHS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+const T = iso => Date.parse(iso + "T00:00:00Z");
+const DAY = 86400000;
+const COL = { measured: "var(--c-measured)", model: "var(--c-model)", stock: "var(--c-stock)", context: "var(--c-context)" };
+const DASH = "5 3", DOT = "1.5 3";
+
+function niceStep(span, n) {
+  const raw = span / n, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  return [1, 2, 2.5, 5, 10].map(f => f * p).find(s => s >= raw) || 10 * p;
+}
+
+function makeChart(host, x0, x1, yMin, yMax, yLabel) {
+  const W = Math.max(260, Math.round(host.clientWidth || 320)), H = 220, m = { l: 34, r: 6, t: 18, b: 22 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const sx = t => m.l + (t - x0) / (x1 - x0) * pw;
+  const sy = v => m.t + (1 - (v - yMin) / (yMax - yMin)) * ph;
+  const clip = "clip" + host.id;
+  const grid = [], data = [];
+  const step = niceStep(yMax - yMin, 4);
+  for (let v = Math.ceil(yMin / step) * step; v <= yMax + 1e-9; v += step) {
+    const y = sy(v).toFixed(1);
+    grid.push(`<line x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}" style="stroke:var(--line)"/>`,
+              `<text x="${m.l - 4}" y="${y}" dy="3.5" text-anchor="end">${fmt(v, step)}</text>`);
+  }
+  // Month ticks; labels every k-th month so they never collide. January carries the year.
+  const d = new Date(x0); d.setUTCDate(1); if (d.getTime() < x0) d.setUTCMonth(d.getUTCMonth() + 1);
+  const nMonths = (x1 - x0) / (30.4 * DAY), k = [1, 2, 3, 4, 6].find(k => pw / nMonths * k >= 34) || 6;
+  for (; d.getTime() <= x1; d.setUTCMonth(d.getUTCMonth() + 1)) {
+    const x = sx(d.getTime()).toFixed(1), mo = d.getUTCMonth();
+    grid.push(`<line x1="${x}" x2="${x}" y1="${H - m.b}" y2="${H - m.b + 3}" style="stroke:var(--muted)"/>`);
+    if (mo % k === 0) grid.push(`<text x="${x}" y="${H - m.b + 14}" text-anchor="middle">${
+      mo === 0 ? "Jan " + String(d.getUTCFullYear()).slice(2) : MONTHS[mo]}</text>`);
+  }
+  grid.push(`<text x="${m.l}" y="${m.t - 7}" text-anchor="start">${yLabel}</text>`,
+            `<line x1="${m.l}" x2="${W - m.r}" y1="${sy(yMin)}" y2="${sy(yMin)}" style="stroke:var(--muted)"/>`);
+  const pts = rows => rows.map(([t, v]) => `${sx(t).toFixed(1)},${sy(v).toFixed(1)}`).join(" ");
+  return {
+    sx, sy,
+    line(rows, col, w = 1.6, dash = "") {
+      if (rows.length) data.push(`<polyline points="${pts(rows)}" style="fill:none;stroke:${col};stroke-width:${w}${dash ? `;stroke-dasharray:${dash}` : ""}"/>`);
+    },
+    band(rows, col) {  // rows: [t, lo, hi]
+      if (!rows.length) return;
+      const up = rows.map(r => [r[0], r[2]]), lo = rows.map(r => [r[0], r[1]]).reverse();
+      data.push(`<polygon points="${pts(up)} ${pts(lo)}" style="fill:${col};fill-opacity:.18;stroke:none"/>`);
+    },
+    span(t0, t1, col) {
+      data.push(`<rect x="${sx(t0).toFixed(1)}" y="${m.t}" width="${Math.max(0, sx(t1) - sx(t0)).toFixed(1)}" height="${ph}" style="fill:${col};fill-opacity:.12"/>`);
+    },
+    dot(t, v, col, open) {
+      data.push(`<circle cx="${sx(t).toFixed(1)}" cy="${sy(v).toFixed(1)}" r="${open ? 4 : 2.6}" style="fill:${open ? "var(--card)" : col};stroke:${col};stroke-width:${open ? 1.6 : 0}"/>`);
+    },
+    today(t) {
+      const x = sx(t).toFixed(1);
+      data.push(`<line x1="${x}" x2="${x}" y1="${m.t}" y2="${H - m.b}" style="stroke:${COL.context};stroke-width:1;stroke-dasharray:${DOT}"/>`);
+      grid.push(`<text x="${(+x + 3)}" y="${m.t + 9}" style="fill:${COL.context}">heute</text>`);
+    },
+    finish() {
+      host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${yLabel}">` +
+        `<defs><clipPath id="${clip}"><rect x="${m.l}" y="${m.t - 4}" width="${pw}" height="${ph + 4}"/></clipPath></defs>` +
+        grid.join("") + `<g clip-path="url(#${clip})">${data.join("")}</g></svg>`;
+    },
+  };
+}
+const fmt = (v, step) => num(v, step < 1 ? (step < 0.25 ? 2 : 1) : 0);
+
+function legend(el, items) {
+  el.textContent = "";
+  items.forEach(([label, kind, col, dash]) => {
+    const s = document.createElement("span");
+    const sw = kind === "band" ? `<rect x="0" y="1" width="18" height="8" style="fill:${col};fill-opacity:${col === COL.context ? .2 : .3}"/>`
+      : kind === "open" ? `<circle cx="9" cy="5" r="3.5" style="fill:var(--card);stroke:${col};stroke-width:1.5"/>`
+      : kind === "dotline" ? `<line x1="0" x2="18" y1="5" y2="5" style="stroke:${col};stroke-width:1.6"/><circle cx="9" cy="5" r="2.6" style="fill:${col}"/>`
+      : `<line x1="0" x2="18" y1="5" y2="5" style="stroke:${col};stroke-width:${kind === "thick" ? 3 : 1.6}${dash ? `;stroke-dasharray:${dash}` : ""}"/>`;
+    s.innerHTML = `<svg viewBox="0 0 18 10" aria-hidden="true">${sw}</svg>`;
+    s.appendChild(document.createTextNode(label));
+    el.appendChild(s);
+  });
+}
+
+function renderCharts() {
+  const R = state.results, C = state.charts || {};
+  if (!R) return;
+  const missing = !C.history || !C.band || !C.proj || !C.path;
+  $("chartsMissing").classList.toggle("hidden", !missing);
+  ["chartUse", "legendUse", "chartStock", "legendStock"].forEach(id => $(id).classList.toggle("hidden", missing));
+  document.querySelectorAll("#charts .chartcap").forEach(p => p.classList.toggle("hidden", missing));
+  if (missing) return;
+  const cs = R.current_season, st = R.stock, now = T(R.as_of), nW = cs.weather_years.length;
+  const x0 = T(state.window === "all" ? R.previous_season.start : cs.start), x1 = T(cs.end);
+  const inX = t => t >= x0 - DAY && t <= x1 + DAY;
+  const L = state.ledger.map(r => ({ t: T(r.date), date: r.date, change: r.change, stock: r.stock }));
+
+  // ---- consumption (bags/day)
+  const hist = C.history.map(r => [T(r.Date), +r.bags_per_day_smoothed]).filter(r => inX(r[0]));
+  const band = C.band.map(r => [T(r.Date), +r.min_bags_per_day, +r.max_bags_per_day, +r.median_bags_per_day])
+    .filter(r => r[0] >= now && inX(r[0]));
+  const fitted = new Set((C.iv || []).map(r => r.start + "/" + r.end));
+  const meas = [];
+  for (let i = 1; i < L.length; i++) {
+    const a = L[i - 1], b = L[i];
+    if (b.change > 0) continue;  // a delivery inside the interval hides the use
+    const days = (b.t - a.t) / DAY;
+    meas.push({ a: a.t, b: b.t, rate: -b.change / days, fit: fitted.has(a.date + "/" + b.date) });
+  }
+  const shown = meas.filter(r => r.b >= x0 && r.a <= x1);
+  const yMaxU = Math.max(0.5, ...hist.map(r => r[1]), ...band.map(r => r[2]), ...shown.map(r => r.rate)) * 1.1;
+  const cu = makeChart($("chartUse"), x0, x1, 0, yMaxU, "Säcke/Tag");
+  (R.use_statements || []).forEach(s => cu.span(T(s.start), T(s.end) + DAY, COL.context));
+  cu.band(band, COL.model);
+  cu.line(hist, COL.model);
+  cu.line(band.map(r => [r[0], r[3]]), COL.model, 1.6, DASH);
+  shown.forEach(r => cu.line([[r.a, r.rate], [r.b, r.rate]], COL.measured, r.fit ? 3 : 1.6, r.fit ? "" : "3 2"));
+  cu.today(now);
+  cu.finish();
+  legend($("legendUse"), [
+    ["Gemessen (Mittel je Zeitraum)", "thick", COL.measured],
+    ["Gemessen, nicht in der Anpassung", "line", COL.measured, "3 2"],
+    ["Modell, beobachtetes Wetter", "line", COL.model],
+    ["Prognose, Median", "line", COL.model, DASH],
+    [`Prognose, Spanne über ${nW} Wetterjahre`, "band", COL.model],
+    ["Keine Nutzung (angegeben)", "band", COL.context],
+  ]);
+
+  // ---- stock (bags)
+  const proj = C.proj.map(r => [T(r.Date), +r.min_bags, +r.max_bags, +r.median_bags]).filter(r => inX(r[0]));
+  const pathStarts = new Set(C.path.map(r => r.interval_start));
+  const groups = {};
+  C.path.forEach(r => (groups[r.interval_start] = groups[r.interval_start] || []).push([T(r.Date), +r.stock_bags]));
+  const Ls = L.filter(r => inX(r.t));
+  const yMaxS = Math.max(10, ...L.filter((r, i) => inX(r.t) || (L[i + 1] && inX(L[i + 1].t))).map(r => r.stock),
+                         ...proj.map(r => r[2])) * 1.08;
+  const cst = makeChart($("chartStock"), x0, x1, 0, yMaxS, "Säcke (15 kg)");
+  cst.band(proj, COL.model);
+  cst.line(proj.map(r => [r[0], r[3]]), COL.model, 1.6, DASH);
+  for (let i = 1; i < L.length; i++)
+    if (!pathStarts.has(L[i - 1].date)) cst.line([[L[i - 1].t, L[i - 1].stock], [L[i].t, L[i].stock]], COL.measured);
+  Object.values(groups).forEach(g => cst.line(g, COL.measured, 1.6, DASH));
+  Ls.forEach(r => cst.dot(r.t, r.stock, COL.measured));
+  if (!st.counted_today) cst.dot(now, st.estimated_today_bags, COL.stock, true);
+  cst.today(now);
+  cst.finish();
+  legend($("legendStock"), [
+    ["Gezählt", "dotline", COL.measured],
+    ["Zwischen Zählungen: Lieferung am Liefertag, Modellverbrauch", "line", COL.measured, DASH],
+    ["Prognose, Median", "line", COL.model, DASH],
+    [`Prognose, Spanne über ${nW} Wetterjahre`, "band", COL.model],
+    ...(st.counted_today ? [] : [["Geschätzt heute (nicht gezählt)", "open", COL.stock]]),
+  ]);
+}
+
+function setWindow(w) {
+  state.window = w;
+  store.set("chartWindow", w);
+  $("wSeason").setAttribute("aria-pressed", w === "season");
+  $("wAll").setAttribute("aria-pressed", w === "all");
+  renderCharts();
 }
 
 // ---------------------------------------------------------------- entry
@@ -498,6 +702,11 @@ $("submit").onclick = submitEntry;
 $("editLast").onclick = startEdit;
 $("cancelEdit").onclick = () => { endEdit(); setStatus("", ""); };
 $("refresh").onclick = loadAll;
+$("wSeason").onclick = () => setWindow("season");
+$("wAll").onclick = () => setWindow("all");
+setWindow(store.get("chartWindow") === "all" ? "all" : "season");
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderCharts, 150); });
 $("openReport").onclick = openReport;
 $("closeReport").onclick = () => { $("reportWrap").classList.add("hidden"); $("reportFrame").srcdoc = ""; };
 $("settingsBtn").onclick = () => $("settings").classList.toggle("hidden");
